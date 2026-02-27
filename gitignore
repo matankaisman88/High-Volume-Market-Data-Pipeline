@@ -1,0 +1,14 @@
+# Spark & Delta temporary files
+data/
+spark-warehouse/
+metastore_db/
+derby.log
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Docker logs
+logs/
