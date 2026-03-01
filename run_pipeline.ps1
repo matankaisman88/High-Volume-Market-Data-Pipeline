@@ -1,6 +1,29 @@
-# PowerShell script to run the full data processing pipeline
+# ==============================================================================
+# run_pipeline.ps1  -  Crypto Data Pipeline launcher
+#
+# Modes
+# -----
+#   Default (API mode)    : .\run_pipeline.ps1
+#   Stress-test (generate): .\run_pipeline.ps1 -StressTest
+#
+# Stress-test parameters (override with env vars before calling, or edit below):
+#   STRESS_TEST_COINS       - number of synthetic coins   (default 200)
+#   STRESS_TEST_DAYS        - days of hourly history       (default 30)
+#   SPARK_TOTAL_CORES       - cores hint for shuffle calc  (default 22)
+#   SPARK_CORES_MAX         - hard cap on cluster cores    (unset = use all)
+#   SPARK_EXECUTOR_MEMORY   - explicit executor memory     (default: unset)
+#   SPARK_CONTAINER_MEMORY_GB - container RAM GB           (executor gets 80%)
+# ==============================================================================
 
-# Ensure necessary directories exist locally
+param(
+    [switch]$StressTest,
+    [int]$Coins       = 200,
+    [int]$Days        = 30,
+    [string]$ExecMemory = "4g",
+    [int]$TotalCores  = 22
+)
+
+# Ensure local data directories exist
 $dataDirs = @("./data", "./data/bronze", "./data/silver", "./data/gold")
 foreach ($dir in $dataDirs) {
     if (-Not (Test-Path $dir)) {
@@ -17,18 +40,17 @@ $allHealthy = $false
 
 while (-not $allHealthy -and $retryCount -lt $maxRetries) {
     $rawStatus = docker compose ps --format json
-    # Handle single object vs array of objects
     if ($rawStatus -match "^\{") {
         $status = $rawStatus | ConvertFrom-Json
     } else {
         $status = $rawStatus | ConvertFrom-Json
     }
-    
-    $unhealthy = @($status) | Where-Object { 
-        # Check health only for services that have healthchecks defined
-        ($_.Health -ne $null -and $_.Health -ne "" -and $_.Health -ne "healthy") -and ($_.State -eq "running" -or $_.State -eq "restarting" -or $_.State -eq "created")
+
+    $unhealthy = @($status) | Where-Object {
+        ($_.Health -ne $null -and $_.Health -ne "" -and $_.Health -ne "healthy") -and
+        ($_.State -eq "running" -or $_.State -eq "restarting" -or $_.State -eq "created")
     }
-    
+
     if (@($status).Count -eq 0) {
         Write-Host "No containers found. Please run 'docker-compose up -d' first."
         exit 1
@@ -38,7 +60,7 @@ while (-not $allHealthy -and $retryCount -lt $maxRetries) {
         $allHealthy = $true
         Write-Host "All services are healthy!"
     } else {
-        Write-Host "Waiting for services to become healthy ($($retryCount + 1)/$maxRetries)..."
+        Write-Host "Waiting for services ($($retryCount + 1)/$maxRetries)..."
         Start-Sleep -Seconds 5
         $retryCount++
     }
@@ -50,49 +72,68 @@ if (-not $allHealthy) {
     exit 1
 }
 
-# Define Spark arguments as a PowerShell Array
-$sparkArgs = @(
-    "--packages", "io.delta:delta-spark_2.12:3.1.0",
+# Delta JARs are pre-installed in /opt/spark/jars - no --packages needed.
+$sparkConf = @(
     "--conf", "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
     "--conf", "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
 )
 
-# Step 1: Extract Crypto Data
-Write-Host "Running Bronze: Extracting Crypto Data..."
-docker exec spark-master spark-submit --master spark://spark-master:7077 $sparkArgs /opt/spark/src/ingestion/extract_crypto_data.py
+# Build environment variable flags for docker exec
+$envVars = @(
+    "-e", "SPARK_TOTAL_CORES=$TotalCores",
+    "-e", "SPARK_LOG_LEVEL=INFO"
+)
+
+if ($StressTest) {
+    $totalRows = $Coins * $Days * 24
+    Write-Host ""
+    Write-Host "============================================================"
+    Write-Host " STRESS-TEST MODE"
+    Write-Host "   Coins    : $Coins"
+    Write-Host "   Days     : $Days  (hourly -> $totalRows rows)"
+    Write-Host "   Exec mem : $ExecMemory"
+    Write-Host "   Cores    : $TotalCores (no cap - uses all cluster cores)"
+    Write-Host "============================================================"
+    Write-Host ""
+
+    $envVars += "-e", "INGESTION_MODE=generate"
+    $envVars += "-e", "STRESS_TEST_COINS=$Coins"
+    $envVars += "-e", "STRESS_TEST_DAYS=$Days"
+    $envVars += "-e", "SPARK_EXECUTOR_MEMORY=$ExecMemory"
+    # SPARK_CORES_MAX is intentionally NOT set so Spark claims all worker cores.
+
+    # Encode shuffle partitions explicitly so the value is visible in the Spark UI.
+    $shufflePartitions = $TotalCores * 4
+    $sparkConf += "--conf", "spark.sql.shuffle.partitions=$shufflePartitions"
+} else {
+    $topN = $env:TOP_N_COINS
+    if (-not $topN) { $topN = "50" }
+    Write-Host ""
+    Write-Host "============================================================"
+    Write-Host " API MODE  (top-$topN coins from CoinGecko)"
+    Write-Host "============================================================"
+    Write-Host ""
+    $envVars += "-e", "INGESTION_MODE=api"
+}
+
+Write-Host "Running pipeline: Bronze -> Silver -> Gold + metastore registration..."
+$cmd = @("exec") + $envVars + @(
+    "spark-master", "spark-submit",
+    "--master", "spark://spark-master:7077"
+) + $sparkConf + @("/opt/spark/src/main_pipeline.py")
+
+docker $cmd
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Extraction failed with exit code $LASTEXITCODE"
+    Write-Host "Error: Pipeline failed with exit code $LASTEXITCODE"
     exit 1
 }
 
-# Step 2: Convert Bronze to Silver
-Write-Host "Running Silver: Converting Bronze to Silver..."
-docker exec spark-master spark-submit --master spark://spark-master:7077 $sparkArgs /opt/spark/src/processing/bronze_to_silver_crypto.py
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Bronze to Silver conversion failed with exit code $LASTEXITCODE"
-    exit 1
-}
-
-# Step 3: Convert Silver to Gold and generate CSV
-Write-Host "Running Gold: Converting Silver to Gold..."
-docker exec spark-master spark-submit --master spark://spark-master:7077 $sparkArgs /opt/spark/src/processing/silver_to_gold_crypto_stats.py
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Silver to Gold conversion failed with exit code $LASTEXITCODE"
-    exit 1
-}
-
-# Step 4: Register tables in Metastore
-Write-Host "Running Metastore Registration..."
-docker exec spark-master spark-submit --master spark://spark-master:7077 $sparkArgs /opt/spark/src/processing/fix_metastore_registration.py
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Warning: Metastore registration failed! The pipeline will continue, but the Hive table might not be available."
-}
-
-# Check if Final_Report.csv is created
+# Verify output
 $finalReport = "./data/Final_Report.csv"
 if (-Not (Test-Path $finalReport)) {
-    Write-Host "Error: Final_Report.csv not found!"
-    exit 1
+    Write-Host "Warning: Final_Report.csv not found (check Gold layer output)."
+} else {
+    $rowCount = (Import-Csv $finalReport | Measure-Object).Count
+    Write-Host "Pipeline completed successfully!"
+    Write-Host "Final_Report.csv: $rowCount data rows at $finalReport"
 }
-
-Write-Host "Pipeline completed successfully! Report generated at $finalReport"

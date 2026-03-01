@@ -1,16 +1,13 @@
-import requests
-import json
 import os
 import shutil
-from pyspark.sql import SparkSession
+import json
+import requests
 from pyspark.sql import functions as F
 
-# הגדרת סשן שכוללת את ה-Extensions של Delta באופן מפורש
-spark = SparkSession.builder \
-    .appName("CryptoPipeline") \
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-    .getOrCreate()
+# Use centralized spark_manager for AQE, shuffle tuning, and Delta
+from src.config.spark_manager import build_spark_session
+
+spark = build_spark_session("CryptoPipeline", force_local=True)
 
 def fetch_crypto_data():
     url = "https://api.coingecko.com/api/v3/coins/markets"

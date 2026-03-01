@@ -1,63 +1,33 @@
 import logging
+from pathlib import Path
+import sys
+
+_root = Path(__file__).resolve().parents[2]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
 
+from src.config.spark_manager import build_spark_session
 
 SILVER_PATH = "/opt/spark/data/silver/crypto_prices/"
 
+# Hive metastore settings (same as pipeline)
+HIVE_JDBC_URL = "jdbc:postgresql://metastore-db:5432/metastore"
+HIVE_JDBC_USER = "metastore_user"
+HIVE_JDBC_PASSWORD = "metastore_password"
+
 
 def _build_spark_session() -> SparkSession:
-    """
-    Build a SparkSession with Delta Lake and the same configuration
-    used by the main bronze-to-silver processing job.
-    """
-    spark = (
-        SparkSession.builder.appName("ViewDeltaHistoryCryptoPrices")
-        .master("spark://spark-master:7077")
-        .config("spark.sql.shuffle.partitions", "4")
-        .config(
-            "spark.sql.extensions",
-            "io.delta.sql.DeltaSparkSessionExtension",
-        )
-        .config(
-            "spark.sql.catalog.spark_catalog",
-            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-        )
-        # PostgreSQL-backed Hive metastore
-        .config("spark.sql.catalogImplementation", "hive")
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionURL",
-            "jdbc:postgresql://metastore-db:5432/metastore",
-        )
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionDriverName",
-            "org.postgresql.Driver",
-        )
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionUserName",
-            "metastore_user",
-        )
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionPassword",
-            "metastore_password",
-        )
-        .config(
-            "spark.hadoop.datanucleus.autoCreateSchema",
-            "true",
-        )
-        .config(
-            "spark.hadoop.datanucleus.fixedDatastore",
-            "false",
-        )
-        .config(
-            "spark.hadoop.hive.metastore.schema.verification",
-            "false",
-        )
-        .getOrCreate()
+    return build_spark_session(
+        "ViewDeltaHistoryCryptoPrices",
+        force_local=False,
+        use_hive=True,
+        hive_jdbc_url=HIVE_JDBC_URL,
+        hive_jdbc_user=HIVE_JDBC_USER,
+        hive_jdbc_password=HIVE_JDBC_PASSWORD,
     )
-    spark.sparkContext.setLogLevel("WARN")
-    return spark
 
 
 def _get_logger() -> logging.Logger:

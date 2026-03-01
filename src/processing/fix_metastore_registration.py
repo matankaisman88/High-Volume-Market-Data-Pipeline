@@ -1,37 +1,25 @@
+from pathlib import Path
+import sys
+
+_root = Path(__file__).resolve().parents[2]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 from pyspark.sql import SparkSession
+
+from src.config.spark_manager import build_spark_session
 
 
 def _build_spark_session() -> SparkSession:
-    """
-    Build a SparkSession with Hive support enabled and configured
-    to use a PostgreSQL-backed metastore.
-    """
-    spark = (
-        SparkSession.builder.appName("FixMetastoreRegistration")
-        .enableHiveSupport()
-        .config("spark.sql.catalogImplementation", "hive")
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionURL",
-            "jdbc:postgresql://metastore-db:5432/metastore",
-        )
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionDriverName",
-            "org.postgresql.Driver",
-        )
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionUserName",
-            "metastore_user",
-        )
-        .config(
-            "spark.hadoop.javax.jdo.option.ConnectionPassword",
-            "metastore_password",
-        )
-        .getOrCreate()
+    return build_spark_session(
+        "FixMetastoreRegistration",
+        force_local=False,
+        use_delta=True,
+        use_hive=True,
+        hive_jdbc_url="jdbc:postgresql://metastore-db:5432/metastore",
+        hive_jdbc_user="metastore_user",
+        hive_jdbc_password="metastore_password",
     )
-
-    # Keep the output reasonably quiet when running in the container.
-    spark.sparkContext.setLogLevel("WARN")
-    return spark
 
 
 def main() -> None:
